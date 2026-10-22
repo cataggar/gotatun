@@ -123,7 +123,7 @@ class CheckUpstreamTests(unittest.TestCase):
         )
         api.set("/repos/cataggar/gotatun/git/ref/tags/v0.10.2", 404, None)
 
-        # Case 1: Draft release even with all 12 assets
+        # Case 1: Draft release even with all 6 assets
         api.set(
             "/repos/cataggar/gotatun/releases/tags/v0.10.2",
             200,
@@ -136,9 +136,9 @@ class CheckUpstreamTests(unittest.TestCase):
         result_draft = check_upstream.check_upstream(api_get=api)
         self.assertEqual(result_draft["needs_publish"], "true")
 
-        # Case 2: Published release missing 1 .sha256 sidecar
+        # Case 2: Published release missing 1 archive asset
         partial_assets = make_complete_assets("v0.10.2")[:-1]
-        self.assertEqual(len(partial_assets), 11)
+        self.assertEqual(len(partial_assets), 5)
         api.set(
             "/repos/cataggar/gotatun/releases/tags/v0.10.2",
             200,

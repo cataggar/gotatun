@@ -365,13 +365,13 @@ class ReleaseToolTestCase(unittest.TestCase):
         tag = "v0.10.2"
         _, dist_dir = self._create_source_and_dist(tag=tag)
 
-        # Corrupt a .sha256 sidecar
-        sidecar = dist_dir / f"gotatun-{tag}-x86_64-unknown-linux-gnu.tar.gz.sha256"
-        orig_sidecar = sidecar.read_text(encoding="utf-8")
-        sidecar.write_text("0" * 64 + f"  gotatun-{tag}-x86_64-unknown-linux-gnu.tar.gz\n", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "SHA-256 digest mismatch"):
+        # Truncate an archive to 0 bytes
+        linux_tar = dist_dir / f"gotatun-{tag}-x86_64-unknown-linux-gnu.tar.gz"
+        orig_bytes = linux_tar.read_bytes()
+        linux_tar.write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "Missing or empty archive"):
             release_tool.verify_assets(tag=tag, dist_dir=dist_dir)
-        sidecar.write_text(orig_sidecar, encoding="utf-8")
+        linux_tar.write_bytes(orig_bytes)
 
         # Remove an asset
         win_zip = dist_dir / f"gotatun-{tag}-aarch64-pc-windows-msvc.zip"
@@ -430,8 +430,6 @@ class ReleaseToolTestCase(unittest.TestCase):
                 with tarfile.open(mode="w", fileobj=gz_fh) as tf:
                     release_tool._add_tar_bytes(tf, f"{prefix}/gotatun", b"binary", mode=0o644)
                     release_tool._add_tar_bytes(tf, f"{prefix}/LICENSE", b"license", mode=0o644)
-        digest = release_tool.sha256_file(archive_path)
-        (dist_dir / f"{archive_name}.sha256").write_text(f"{digest}  {archive_name}\n", encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "must have mode 0755"):
             release_tool.verify_assets(tag=tag, dist_dir=dist_dir)
@@ -445,11 +443,10 @@ class ReleaseToolTestCase(unittest.TestCase):
             repo="cataggar/gotatun",
             output_path=notes_path,
         )
-        self.assertIn("mullvad/gotatun@v0.10.2", text)
-        self.assertIn(sha, text)
-        self.assertIn("ghr install cataggar/gotatun", text)
+        self.assertIn("Install with [ghr](https://cataggar.github.io/ghr/):", text)
         self.assertIn("ghr install cataggar/gotatun@v0.10.2", text)
-        self.assertIn("ghr uninstall cataggar/gotatun", text)
+        self.assertNotIn("ghr uninstall cataggar/gotatun", text)
+        self.assertIn("## Platform & Runtime Notes", text)
         self.assertIn("glibc >= 2.35", text)
         self.assertIn("wintun.dll", text)
 

@@ -102,14 +102,9 @@ def archive_name_for_target(tag: str, target: str) -> str:
 
 
 def expected_asset_names(tag: str) -> list[str]:
-    """Return all 12 expected release asset filenames (6 archives + 6 .sha256 sidecars)."""
+    """Return all 6 expected release archive filenames."""
     parse_semver_tag(tag)
-    names: list[str] = []
-    for target in TARGETS:
-        archive = archive_name_for_target(tag, target)
-        names.append(archive)
-        names.append(f"{archive}.sha256")
-    return names
+    return [archive_name_for_target(tag, target) for target in TARGETS]
 
 
 def get_github_token() -> str | None:
@@ -555,8 +550,8 @@ def package_target(
     source_dir: Path | str,
     dist_dir: Path | str,
     wintun_dir: Path | str | None = None,
-) -> tuple[Path, Path]:
-    """Package built binary, licenses, and (on Windows) wintun.dll into dist_dir with a .sha256 sidecar."""
+) -> Path:
+    """Package built binary, licenses, and (on Windows) wintun.dll into dist_dir."""
     parse_semver_tag(tag)
     if target not in TARGETS:
         raise ValueError(f"Unsupported target: {target!r}")
@@ -629,14 +624,11 @@ def package_target(
                     for arcname, content, mode in entries_tar:
                         _add_tar_bytes(tf, arcname, content, mode=mode)
 
-    digest = sha256_file(archive_path)
-    sidecar_path = out_dir / f"{archive_filename}.sha256"
-    sidecar_path.write_text(f"{digest}  {archive_filename}\n", encoding="utf-8")
-    return archive_path, sidecar_path
+    return archive_path
 
 
 def verify_single_archive(tag: str, target: str, dist_dir: Path | str) -> None:
-    """Verify a single target's archive and .sha256 sidecar in dist_dir."""
+    """Verify a single target's archive in dist_dir."""
     parse_semver_tag(tag)
     if target not in TARGETS:
         raise ValueError(f"Unsupported target: {target!r}")
@@ -644,30 +636,9 @@ def verify_single_archive(tag: str, target: str, dist_dir: Path | str) -> None:
     dpath = Path(dist_dir)
     archive_filename = archive_name_for_target(tag, target)
     archive_path = dpath / archive_filename
-    sidecar_path = dpath / f"{archive_filename}.sha256"
 
     if not archive_path.is_file() or archive_path.stat().st_size == 0:
         raise ValueError(f"Missing or empty archive: {archive_path}")
-    if not sidecar_path.is_file() or sidecar_path.stat().st_size == 0:
-        raise ValueError(f"Missing or empty SHA-256 sidecar: {sidecar_path}")
-
-    sidecar_text = sidecar_path.read_text(encoding="utf-8")
-    match = SHA256_LINE_RE.match(sidecar_text)
-    if not match:
-        raise ValueError(f"Malformed SHA-256 sidecar {sidecar_path}: {sidecar_text!r}")
-    expected_digest, recorded_name = match.group(1), match.group(2)
-    if recorded_name != archive_filename:
-        raise ValueError(
-            f"SHA-256 sidecar filename mismatch in {sidecar_path}: "
-            f"got {recorded_name!r}, expected {archive_filename!r}"
-        )
-
-    actual_digest = sha256_file(archive_path)
-    if actual_digest != expected_digest:
-        raise ValueError(
-            f"SHA-256 digest mismatch for {archive_path}: "
-            f"actual {actual_digest} != sidecar {expected_digest}"
-        )
 
     root_prefix = f"gotatun-{tag}-{target}/"
     is_windows = bool(TARGETS[target]["is_windows"])
@@ -731,7 +702,7 @@ def verify_single_archive(tag: str, target: str, dist_dir: Path | str) -> None:
 
 
 def verify_assets(tag: str, dist_dir: Path | str) -> None:
-    """Verify all 12 release assets exist in dist_dir and pass checksum, content, and PE architecture checks."""
+    """Verify all 6 release archives exist in dist_dir and pass content and PE architecture checks."""
     parse_semver_tag(tag)
     dpath = Path(dist_dir)
     if not dpath.is_dir():
@@ -760,73 +731,19 @@ def render_notes(
         raise ValueError(f"Invalid upstream commit SHA: {upstream_sha!r}")
 
     lines = [
-        f"# GotaTun `{tag}`",
-        "",
-        f"Prebuilt multi-platform release binaries for [`{upstream_repo}@{tag}`](https://github.com/{upstream_repo}/tree/{tag}) "
-        f"(commit [`{sha[:12]}`](https://github.com/{upstream_repo}/commit/{sha})).",
-        "",
-        "## Quick Install with `ghr`",
-        "",
-        "Install the latest release:",
-        "",
-        "```sh",
-        f"ghr install {repo}",
-        "```",
-        "",
-        f"Install this specific version (`{tag}`):",
+        "Install with [ghr](https://cataggar.github.io/ghr/):",
         "",
         "```sh",
         f"ghr install {repo}@{tag}",
         "```",
         "",
-        "Uninstall:",
+        "## Platform & Runtime Notes",
         "",
-        "```sh",
-        f"ghr uninstall {repo}",
-        "```",
+        "- **Privileges**: Creating TUN interfaces requires elevated privileges (`sudo` or `CAP_NET_ADMIN` on Linux, `sudo` on macOS, Administrator on Windows).",
+        "- **Linux (`gnu`)**: Built on Ubuntu 22.04; requires `glibc >= 2.35` (Ubuntu 22.04+, Debian 12+, Fedora 36+, RHEL 9+).",
+        f"- **Windows (`msvc`)**: Archives bundle official [Wintun {WINTUN_VERSION}]({WINTUN_URL}) (`wintun.dll`, zip SHA-256 `{WINTUN_SHA256}`) and `LICENSE-WINTUN.txt` right alongside `gotatun.exe` so Windows loads the architecture-matched `wintun.dll` automatically when installed via `ghr`.",
         "",
-        "## Release Targets",
-        "",
-        "| Target | Platform | Archive | Checksum |",
-        "| --- | --- | --- | --- |",
     ]
-    for target, info in TARGETS.items():
-        archive = archive_name_for_target(tag, target)
-        lines.append(f"| `{target}` | {info['os_label']} | `{archive}` | `{archive}.sha256` |")
-
-    lines.extend(
-        [
-            "",
-            "## Platform & Runtime Notes",
-            "",
-            "- **Privileges**: Creating TUN interfaces requires elevated privileges (`sudo` or `CAP_NET_ADMIN` on Linux, `sudo` on macOS, Administrator on Windows).",
-            "- **Linux (`gnu`)**: Built on Ubuntu 22.04; requires `glibc >= 2.35` (Ubuntu 22.04+, Debian 12+, Fedora 36+, RHEL 9+).",
-            f"- **Windows (`msvc`)**: Archives bundle official [Wintun {WINTUN_VERSION}]({WINTUN_URL}) (`wintun.dll`, zip SHA-256 `{WINTUN_SHA256}`) and `LICENSE-WINTUN.txt` right alongside `gotatun.exe` so Windows loads the architecture-matched `wintun.dll` automatically when installed via `ghr`.",
-            "",
-            "## Verification",
-            "",
-            "### SHA-256 Checksums",
-            "",
-            "```sh",
-            f"sha256sum -c gotatun-{tag}-<target>.tar.gz.sha256",
-            "# or on macOS:",
-            f"shasum -a 256 -c gotatun-{tag}-<target>.tar.gz.sha256",
-            "```",
-            "",
-            "### GitHub Build Provenance Attestation",
-            "",
-            "```sh",
-            f"gh attestation verify gotatun-{tag}-<target>.tar.gz --repo {repo}",
-            "```",
-            "",
-            "## Upstream Provenance",
-            "",
-            f"- **Upstream Repository**: [`{upstream_repo}`](https://github.com/{upstream_repo})",
-            f"- **Upstream Tag**: [`{tag}`](https://github.com/{upstream_repo}/releases/tag/{tag})",
-            f"- **Upstream Commit SHA**: `{sha}`",
-            "",
-        ]
-    )
 
     content = "\n".join(lines)
     out_file = Path(output_path)
@@ -881,12 +798,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_pkg.add_argument("--target", required=True, help="Target triple")
     p_pkg.add_argument("--bin-path", required=True, help="Path to compiled gotatun binary")
     p_pkg.add_argument("--source-dir", required=True, help="Path to upstream source checkout")
-    p_pkg.add_argument("--dist-dir", required=True, help="Output directory for archives and .sha256 sidecars")
+    p_pkg.add_argument("--dist-dir", required=True, help="Output directory for release archives")
     p_pkg.add_argument("--wintun-dir", default=None, help="Directory containing wintun.dll and LICENSE-WINTUN.txt")
 
-    p_verify = subparsers.add_parser("verify-assets", help="Verify all 12 release assets in dist directory")
+    p_verify = subparsers.add_parser("verify-assets", help="Verify all 6 release archives in dist directory")
     p_verify.add_argument("--tag", required=True, help="Stable semver tag (e.g. v0.10.2)")
-    p_verify.add_argument("--dist-dir", required=True, help="Directory containing release archives and .sha256 files")
+    p_verify.add_argument("--dist-dir", required=True, help="Directory containing release archives")
 
     p_notes = subparsers.add_parser("render-notes", help="Render release notes Markdown")
     p_notes.add_argument("--tag", required=True, help="Stable semver tag (e.g. v0.10.2)")
@@ -928,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.subcommand == "package":
-            archive_path, sidecar_path = package_target(
+            archive_path = package_target(
                 tag=args.tag,
                 target=args.target,
                 bin_path=args.bin_path,
@@ -936,12 +853,12 @@ def main(argv: list[str] | None = None) -> int:
                 dist_dir=args.dist_dir,
                 wintun_dir=args.wintun_dir,
             )
-            print(f"Packaged {archive_path} and {sidecar_path}")
+            print(f"Packaged {archive_path}")
             return 0
 
         if args.subcommand == "verify-assets":
             verify_assets(tag=args.tag, dist_dir=args.dist_dir)
-            print(f"Verified all 12 release assets for {args.tag} in {args.dist_dir}")
+            print(f"Verified all 6 release assets for {args.tag} in {args.dist_dir}")
             return 0
 
         if args.subcommand == "render-notes":
