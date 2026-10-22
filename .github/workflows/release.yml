@@ -1,0 +1,360 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream stable tag to build and publish (e.g. v0.10.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "release-${{ inputs.tag }}"
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve & Mirror Upstream Tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      tag_exists: ${{ steps.resolve.outputs.tag_exists }}
+      release_complete: ${{ steps.resolve.outputs.release_complete }}
+      make_latest: ${{ steps.resolve.outputs.make_latest }}
+    steps:
+      - name: Checkout ghr branch
+        uses: actions/checkout@v4
+        with:
+          ref: ghr
+
+      - name: Run release tool unit tests
+        run: python3 -m unittest discover -s scripts -p "test_*.py" -v
+
+      - name: Resolve tag and release state
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_tool.py resolve \
+            --tag "${{ inputs.tag }}" \
+            --repo "${{ github.repository }}"
+
+      - name: Mirror upstream tag to origin
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          UPSTREAM_SHA: ${{ steps.resolve.outputs.upstream_sha }}
+          TAG_EXISTS: ${{ steps.resolve.outputs.tag_exists }}
+        run: |
+          git fetch --no-tags https://github.com/mullvad/gotatun.git "refs/tags/${TAG}:refs/tags/${TAG}"
+          FETCHED_SHA="$(git rev-parse "${TAG}^{commit}")"
+          if [ "$FETCHED_SHA" != "$UPSTREAM_SHA" ]; then
+            echo "::error::Fetched tag ${TAG} commit (${FETCHED_SHA}) does not match resolved upstream_sha (${UPSTREAM_SHA})"
+            exit 1
+          fi
+
+          if [ "$TAG_EXISTS" = "false" ]; then
+            git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
+
+          REMOTE_LINES="$(git ls-remote origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}")"
+          echo "$REMOTE_LINES"
+          REMOTE_COMMIT="$(printf '%s\n' "$REMOTE_LINES" | awk -v ref="refs/tags/${TAG}^{}" '$2 == ref { print $1 }')"
+          if [ -z "$REMOTE_COMMIT" ]; then
+            REMOTE_COMMIT="$(printf '%s\n' "$REMOTE_LINES" | awk -v ref="refs/tags/${TAG}" '$2 == ref { print $1 }')"
+          fi
+          if [ "$REMOTE_COMMIT" != "$UPSTREAM_SHA" ]; then
+            echo "::error::Origin tag ${TAG} commit (${REMOTE_COMMIT}) does not match upstream_sha (${UPSTREAM_SHA})"
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: resolve
+    if: needs.resolve.outputs.release_complete != 'true'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            native_exec: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            native_exec: true
+          - target: x86_64-apple-darwin
+            os: macos-15
+            native_exec: true
+          - target: aarch64-apple-darwin
+            os: macos-15
+            native_exec: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            native_exec: true
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            native_exec: false
+    steps:
+      - name: Checkout tooling (ghr branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ghr
+          path: tooling
+          persist-credentials: false
+
+      - name: Checkout upstream mullvad/gotatun source
+        uses: actions/checkout@v4
+        with:
+          repository: mullvad/gotatun
+          ref: ${{ needs.resolve.outputs.upstream_sha }}
+          path: src
+          persist-credentials: false
+
+      - name: Ensure python3 executable on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! python3 --version >/dev/null 2>&1; then
+            PY_BIN="$(command -v python)"
+            cp "$PY_BIN" "$(dirname "$PY_BIN")/python3.exe"
+          fi
+          python3 --version
+
+      - name: Verify upstream source commit SHA
+        shell: bash
+        run: |
+          test "$(git -C src rev-parse HEAD)" = "${{ needs.resolve.outputs.upstream_sha }}"
+
+      - name: Determine pinned Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          python3 tooling/scripts/release_tool.py resolve-toolchain --source-dir src
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.toolchain }}
+          targets: ${{ matrix.target }}
+
+      - name: Configure Windows ARM64 build environment
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: |
+          if ! command -v nasm >/dev/null 2>&1; then
+            if [ -d "/c/Program Files/NASM" ]; then
+              echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH"
+            else
+              choco install nasm -y --no-progress
+              echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH"
+            fi
+          fi
+          if [ -d "/c/Program Files/LLVM/bin" ]; then
+            echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+          fi
+          echo "AWS_LC_SYS_CMAKE_BUILDER=1" >> "$GITHUB_ENV"
+
+      - name: Build gotatun
+        shell: bash
+        run: |
+          cargo build --manifest-path src/Cargo.toml --locked --release -p gotatun-cli --bin gotatun --target ${{ matrix.target }}
+
+      - name: Ensure Rosetta 2 on macOS x86_64
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          if ! /usr/bin/pgrep oahd >/dev/null 2>&1; then
+            sudo softwareupdate --install-rosetta --agree-to-license || true
+          fi
+
+      - name: Check Windows PE architecture
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python3 tooling/scripts/release_tool.py check-pe-arch \
+            --bin-path "src/target/${{ matrix.target }}/release/gotatun.exe" \
+            --target "${{ matrix.target }}"
+
+      - name: Smoke test binary
+        if: matrix.native_exec
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="src/target/${{ matrix.target }}/release/gotatun.exe"
+          else
+            BIN="src/target/${{ matrix.target }}/release/gotatun"
+          fi
+          "$BIN" --version
+          "$BIN" --help >/dev/null
+
+      - name: Fetch and verify official Wintun DLL
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python3 tooling/scripts/release_tool.py fetch-wintun \
+            --target "${{ matrix.target }}" \
+            --output-dir wintun
+
+      - name: Package archive and SHA-256 sidecar
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python3 tooling/scripts/release_tool.py package \
+              --tag "${{ needs.resolve.outputs.tag }}" \
+              --target "${{ matrix.target }}" \
+              --bin-path "src/target/${{ matrix.target }}/release/gotatun.exe" \
+              --source-dir src \
+              --dist-dir dist \
+              --wintun-dir wintun
+          else
+            python3 tooling/scripts/release_tool.py package \
+              --tag "${{ needs.resolve.outputs.tag }}" \
+              --target "${{ matrix.target }}" \
+              --bin-path "src/target/${{ matrix.target }}/release/gotatun" \
+              --source-dir src \
+              --dist-dir dist
+          fi
+
+      - name: Install ghr (Unix)
+        if: matrix.native_exec && runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/cataggar/ghr/main/install.sh | GHR_NO_PATH_ADD=1 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install ghr (Windows)
+        if: matrix.native_exec && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GHR_NO_PATH_ADD = "1"
+          iwr -useb https://raw.githubusercontent.com/cataggar/ghr/main/install.ps1 | iex
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.local\bin"
+
+      - name: Smoke test ghr install
+        if: matrix.native_exec
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ARCHIVE="gotatun-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}.zip"
+          else
+            ARCHIVE="gotatun-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}.tar.gz"
+          fi
+
+          PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          python3 -m http.server "$PORT" --bind 127.0.0.1 --directory dist </dev/null >/dev/null 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          python3 -c "import time, urllib.request; url='http://127.0.0.1:${PORT}/${ARCHIVE}';
+          for _ in range(50):
+              try:
+                  urllib.request.urlopen(url, timeout=1).close(); break
+              except Exception:
+                  time.sleep(0.1)
+          else:
+              raise RuntimeError('Local HTTP server did not become ready')"
+
+          ghr install "http://127.0.0.1:$PORT/$ARCHIVE" "?id=cataggar/gotatun"
+          BIN_DIR="$(ghr path bin | tr -d '\r')"
+          TOOLS_DIR="$(ghr path tools | tr -d '\r')"
+          "$BIN_DIR/gotatun" --version
+          "$BIN_DIR/gotatun" --help >/dev/null
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python3 -c 'import pathlib, sys; root = pathlib.Path(sys.argv[1]) / "cataggar" / "gotatun"; dlls = list(root.rglob("wintun.dll")); exes = list(root.rglob("gotatun.exe")); assert dlls and exes and dlls[0].parent == exes[0].parent, (dlls, exes)' "$TOOLS_DIR"
+          fi
+          ghr uninstall cataggar/gotatun
+
+      - name: Upload target dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Verify, Attest & Publish Release
+    needs: [resolve, build]
+    if: needs.resolve.outputs.release_complete != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout ghr branch
+        uses: actions/checkout@v4
+        with:
+          ref: ghr
+
+      - name: Download all target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify all 12 release assets
+        run: |
+          python3 scripts/release_tool.py verify-assets \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --dist-dir dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/gotatun-*.tar.gz
+            dist/gotatun-*.zip
+
+      - name: Render release notes
+        run: |
+          python3 scripts/release_tool.py render-notes \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --upstream-sha "${{ needs.resolve.outputs.upstream_sha }}" \
+            --repo "${{ github.repository }}" \
+            --output notes.md
+
+      - name: Stage draft release and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          UPSTREAM_SHA: ${{ needs.resolve.outputs.upstream_sha }}
+          MAKE_LATEST: ${{ needs.resolve.outputs.make_latest }}
+        run: |
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "${{ github.repository }}"
+            gh release edit "$TAG" \
+              --title "GotaTun $TAG" \
+              --notes-file notes.md \
+              --repo "${{ github.repository }}"
+          else
+            gh release create "$TAG" dist/* \
+              --draft \
+              --verify-tag \
+              --title "GotaTun $TAG" \
+              --notes-file notes.md \
+              --repo "${{ github.repository }}"
+          fi
+
+          ASSET_COUNT="$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets | length')"
+          if [ "$ASSET_COUNT" -lt 12 ]; then
+            echo "::error::Expected 12 assets on release $TAG, found $ASSET_COUNT"
+            exit 1
+          fi
+
+          gh release edit "$TAG" \
+            --draft=false \
+            --latest="$MAKE_LATEST" \
+            --repo "${{ github.repository }}"
