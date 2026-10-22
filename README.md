@@ -80,7 +80,7 @@ Creating and configuring TUN interfaces requires elevated privileges on every pl
 
 - **Exact upstream commit parity**: Every release tag in `cataggar/gotatun` mirrors the exact upstream [`mullvad/gotatun`](https://github.com/mullvad/gotatun) commit SHA (annotated tags are dereferenced to their target commit, and conflicting tags are rejected).
 - **Checksums & Build Provenance**: Every archive is published with a `<archive>.sha256` sidecar file and a GitHub Actions build provenance attestation generated via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). `ghr` verifies these attestations and checksums automatically during installation.
-- **Code signing**: The `gotatun` (`gotatun.exe`) binaries are compiled directly from upstream source in GitHub Actions and are **not** signed with an Apple Developer ID certificate, notarized for macOS Gatekeeper, or Authenticode-signed on Windows unless separately configured. (The bundled `wintun.dll` inside Windows archives is the unmodified official WireGuard build and retains its upstream Authenticode/WHQL signatures.)
+- **Code signing**: The `gotatun` (`gotatun.exe`) binaries are compiled directly from upstream source in GitHub Actions and are **not** signed with an Apple Developer ID certificate, notarized for macOS Gatekeeper, or Authenticode-signed on Windows unless separately configured. (On Windows, `wintun.dll` is extracted from the SHA-256-verified official `wintun-0.14.1.zip` archive with its embedded WHQL-signed `wintun.sys` kernel driver package preserved inside `.rsrc` and its outer legacy PKCS#9 PE certificate table stripped for `ghr install` compatibility.)
 
 ## Release Automation
 

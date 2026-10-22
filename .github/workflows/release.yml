@@ -227,6 +227,8 @@ jobs:
       - name: Install ghr (Unix)
         if: matrix.native_exec && runner.os != 'Windows'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           curl -fsSL https://raw.githubusercontent.com/cataggar/ghr/main/install.sh | GHR_NO_PATH_ADD=1 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -234,6 +236,8 @@ jobs:
       - name: Install ghr (Windows)
         if: matrix.native_exec && runner.os == 'Windows'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $env:GHR_NO_PATH_ADD = "1"
           iwr -useb https://raw.githubusercontent.com/cataggar/ghr/main/install.ps1 | iex

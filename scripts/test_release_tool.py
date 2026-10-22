@@ -19,22 +19,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_tool  # noqa: E402
 
 
-def make_synthetic_pe(machine: int, e_lfanew: int = 0x80) -> bytes:
-    """Construct a minimal valid Windows PE binary with the given COFF Machine type."""
-    buf = bytearray(e_lfanew + 64)
+def make_synthetic_pe(
+    machine: int,
+    e_lfanew: int = 0x80,
+    with_cert_table: bool = False,
+) -> bytes:
+    """Construct a minimal valid PE32+ binary with the given COFF Machine type."""
+    size_of_opt = 240
+    opt_off = e_lfanew + 24
+    body_len = opt_off + size_of_opt + 64
+    buf = bytearray(body_len)
     buf[0:2] = b"MZ"
     struct.pack_into("<I", buf, 0x3C, e_lfanew)
     buf[e_lfanew : e_lfanew + 4] = b"PE\x00\x00"
     struct.pack_into("<H", buf, e_lfanew + 4, machine)
+    struct.pack_into("<H", buf, e_lfanew + 20, size_of_opt)
+    struct.pack_into("<H", buf, opt_off, 0x020B)  # PE32+
+    struct.pack_into("<I", buf, opt_off + 64, 0x12345678)  # CheckSum
+    struct.pack_into("<I", buf, opt_off + 108, 16)  # NumberOfRvaAndSizes
+    if with_cert_table:
+        cert_blob = b"SYNTHETIC-PKCS7-CERT-BLOB-012345"
+        sec_dir_off = opt_off + 112 + 4 * 8
+        struct.pack_into("<II", buf, sec_dir_off, len(buf), len(cert_blob))
+        buf.extend(cert_blob)
     return bytes(buf)
 
 
 def make_synthetic_wintun_zip() -> tuple[bytes, str]:
-    """Create an in-memory Wintun zip containing amd64/arm64 DLLs and LICENSE.txt."""
+    """Create an in-memory Wintun zip containing amd64/arm64 DLLs (with cert tables) and LICENSE.txt."""
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("wintun/bin/amd64/wintun.dll", make_synthetic_pe(release_tool.PE_MACHINE_AMD64))
-        zf.writestr("wintun/bin/arm64/wintun.dll", make_synthetic_pe(release_tool.PE_MACHINE_ARM64))
+        zf.writestr(
+            "wintun/bin/amd64/wintun.dll",
+            make_synthetic_pe(release_tool.PE_MACHINE_AMD64, with_cert_table=True),
+        )
+        zf.writestr(
+            "wintun/bin/arm64/wintun.dll",
+            make_synthetic_pe(release_tool.PE_MACHINE_ARM64, with_cert_table=True),
+        )
         zf.writestr("wintun/LICENSE.txt", b"Wintun License Content\n")
     raw = bio.getvalue()
     return raw, hashlib.sha256(raw).hexdigest().lower()
@@ -255,6 +277,16 @@ class ReleaseToolTestCase(unittest.TestCase):
             self.assertTrue(dll_path.is_file())
             self.assertTrue(lic_path.is_file())
             release_tool.check_pe_arch(dll_path, target)
+            self.assertFalse(release_tool.has_pe_authenticode(dll_path))
+
+        signed_pe = make_synthetic_pe(release_tool.PE_MACHINE_AMD64, with_cert_table=True)
+        self.assertTrue(release_tool.has_pe_authenticode(signed_pe))
+        stripped_pe = release_tool.strip_pe_authenticode(signed_pe)
+        self.assertFalse(release_tool.has_pe_authenticode(stripped_pe))
+        self.assertEqual(
+            release_tool.check_pe_arch(stripped_pe, "x86_64-pc-windows-msvc"),
+            release_tool.PE_MACHINE_AMD64,
+        )
 
         with self.assertRaisesRegex(ValueError, "Wintun SHA-256 mismatch"):
             release_tool.fetch_wintun(

@@ -361,6 +361,91 @@ def check_pe_arch(source: Path | str | bytes, target: str) -> int:
     return actual_machine
 
 
+def _pe_security_dir_offsets(data: bytes, label: str = "<bytes>") -> tuple[int, int, int, int] | None:
+    """Return (checksum_off, sec_dir_off, cert_off, cert_size) if the PE has a Security DataDirectory."""
+    if len(data) < 0x40 or data[0:2] != b"MZ":
+        raise ValueError(f"Missing MZ DOS header signature in {label}")
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    if e_lfanew + 24 > len(data) or data[e_lfanew : e_lfanew + 4] != b"PE\x00\x00":
+        raise ValueError(f"Missing PE\\0\\0 signature at offset 0x{e_lfanew:x} in {label}")
+
+    size_of_opt = struct.unpack_from("<H", data, e_lfanew + 20)[0]
+    opt_off = e_lfanew + 24
+    if size_of_opt < 68 or opt_off + size_of_opt > len(data):
+        return None
+
+    magic = struct.unpack_from("<H", data, opt_off)[0]
+    if magic == 0x020B:
+        rva_count_rel = 108
+        data_dir_rel = 112
+    elif magic == 0x010B:
+        rva_count_rel = 92
+        data_dir_rel = 96
+    else:
+        return None
+
+    sec_dir_rel = data_dir_rel + 4 * 8
+    if size_of_opt < sec_dir_rel + 8:
+        return None
+
+    num_rva = struct.unpack_from("<I", data, opt_off + rva_count_rel)[0]
+    if num_rva <= 4:
+        return None
+
+    checksum_off = opt_off + 64
+    sec_dir_off = opt_off + sec_dir_rel
+    cert_off, cert_size = struct.unpack_from("<II", data, sec_dir_off)
+    return checksum_off, sec_dir_off, cert_off, cert_size
+
+
+def has_pe_authenticode(source: Path | str | bytes) -> bool:
+    """Return True if the PE image has a non-empty DataDirectory[Security] certificate table."""
+    data = bytes(source) if isinstance(source, (bytes, bytearray)) else Path(source).read_bytes()
+    info = _pe_security_dir_offsets(data)
+    if info is None:
+        return False
+    _, _, cert_off, cert_size = info
+    return cert_off != 0 and cert_size != 0
+
+
+def strip_pe_authenticode(source: Path | str | bytes) -> bytes:
+    """Strip the outer PE DataDirectory[Security] WIN_CERTIFICATE table if present at EOF.
+
+    Official wintun-0.14.1.zip is verified by SHA-256 before extraction, and its embedded
+    WHQL-signed kernel driver package (wintun.sys + wintun.cat) lives untouched inside the
+    PE .rsrc section. However, wintun.dll's outer user-mode PE certificate table uses a
+    2021 PKCS#9 counterSignature rather than an RFC 3161 timestamp token, which causes
+    `ghr install`'s zip PE scanner to fail with MissingSignedAttrs. Stripping the outer
+    certificate table after SHA-256 verification preserves all PE sections and embedded
+    driver resources while allowing `ghr install cataggar/gotatun` to work out-of-the-box.
+    """
+    if isinstance(source, (bytes, bytearray)):
+        data = bytes(source)
+        label = "<bytes>"
+    else:
+        path = Path(source)
+        label = str(path)
+        data = path.read_bytes()
+
+    info = _pe_security_dir_offsets(data, label=label)
+    if info is None:
+        return data
+    checksum_off, sec_dir_off, cert_off, cert_size = info
+    if cert_off == 0 and cert_size == 0:
+        return data
+    if cert_off <= sec_dir_off + 8 or cert_size == 0 or cert_off + cert_size > len(data):
+        raise ValueError(
+            f"Invalid PE Security directory (offset={cert_off}, size={cert_size}, file_len={len(data)}) in {label}"
+        )
+    if len(data) - (cert_off + cert_size) > 8:
+        raise ValueError(f"PE certificate table is not at end of file in {label}")
+
+    out = bytearray(data[:cert_off])
+    out[sec_dir_off : sec_dir_off + 8] = b"\x00" * 8
+    out[checksum_off : checksum_off + 4] = b"\x00" * 4
+    return bytes(out)
+
+
 def download_bytes_with_retry(
     url: str,
     retries: int = 3,
@@ -419,6 +504,7 @@ def fetch_wintun(
         raise ValueError(f"Extracted {WINTUN_LICENSE_ZIP_PATH!r} is empty")
 
     check_pe_arch(dll_bytes, target)
+    dll_bytes = strip_pe_authenticode(dll_bytes)
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -513,7 +599,7 @@ def package_target(
             raise ValueError(f"Required LICENSE-WINTUN.txt missing or empty at {wintun_license}")
 
         check_pe_arch(bin_bytes, target)
-        wintun_dll_bytes = wintun_dll.read_bytes()
+        wintun_dll_bytes = strip_pe_authenticode(wintun_dll.read_bytes())
         check_pe_arch(wintun_dll_bytes, target)
         wintun_license_bytes = wintun_license.read_bytes()
 
@@ -613,6 +699,10 @@ def verify_single_archive(tag: str, target: str, dist_dir: Path | str) -> None:
             dll_bytes = zf.read(f"{root_prefix}wintun.dll")
             check_pe_arch(exe_bytes, target)
             check_pe_arch(dll_bytes, target)
+            if has_pe_authenticode(dll_bytes):
+                raise ValueError(
+                    f"Bundled wintun.dll in {archive_path} still contains an outer PE certificate table"
+                )
     else:
         with tarfile.open(archive_path, "r:gz") as tf:
             members = tf.getmembers()
