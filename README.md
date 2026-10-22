@@ -2,7 +2,7 @@
 
 Release automation for [GotaTun](https://github.com/mullvad/gotatun), a userspace [WireGuard](https://www.wireguard.com/) implementation in Rust by Mullvad VPN.
 
-Upstream does not publish prebuilt binary assets. This repository builds and publishes native `gotatun` (`gotatun-cli`) binaries from official upstream tags so they can be installed with [`ghr`](https://github.com/cataggar/ghr).
+Upstream does not publish prebuilt binary assets. This repository builds and publishes native `gotatun` (`gotatun-cli`) binaries from official upstream tags so they can be installed with [`ghr`](https://cataggar.github.io/ghr/).
 
 ## Branches
 
@@ -11,7 +11,7 @@ Upstream does not publish prebuilt binary assets. This repository builds and pub
 
 ## Install
 
-Install with [`ghr`](https://github.com/cataggar/ghr):
+Install with [`ghr`](https://cataggar.github.io/ghr/):
 
 ```sh
 # Install latest release
@@ -79,12 +79,12 @@ Creating and configuring TUN interfaces requires elevated privileges on every pl
 ## Verification, Provenance & Signing
 
 - **Exact upstream commit parity**: Every release tag in `cataggar/gotatun` mirrors the exact upstream [`mullvad/gotatun`](https://github.com/mullvad/gotatun) commit SHA (annotated tags are dereferenced to their target commit, and conflicting tags are rejected).
-- **Checksums & Build Provenance**: Every archive is published with a `<archive>.sha256` sidecar file and a GitHub Actions build provenance attestation generated via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). `ghr` verifies these attestations and checksums automatically during installation.
+- **Checksums & Build Provenance**: Every archive has a GitHub-published SHA-256 digest and a GitHub Actions build provenance attestation generated via [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance). `ghr` verifies these attestations and checksums automatically during installation.
 - **Code signing**: The `gotatun` (`gotatun.exe`) binaries are compiled directly from upstream source in GitHub Actions and are **not** signed with an Apple Developer ID certificate, notarized for macOS Gatekeeper, or Authenticode-signed on Windows unless separately configured. (On Windows, `wintun.dll` is extracted from the SHA-256-verified official `wintun-0.14.1.zip` archive with its embedded WHQL-signed `wintun.sys` kernel driver package preserved inside `.rsrc` and its outer legacy PKCS#9 PE certificate table stripped for `ghr install` compatibility.)
 
 ## Release Automation
 
-- **Daily upstream check** (`.github/workflows/check-upstream.yml`): Runs daily (and via `workflow_dispatch`) to inspect `mullvad/gotatun` tags, select the newest stable semantic version (`vX.Y.Z`), verify whether a complete published release with all 6 target archives and `.sha256` sidecars exists, and dispatch `release.yml` when missing or incomplete.
+- **Daily upstream check** (`.github/workflows/check-upstream.yml`): Runs daily (and via `workflow_dispatch`) to inspect `mullvad/gotatun` tags, select the newest stable semantic version (`vX.Y.Z`), verify whether a complete published release with all 6 target archives exists, and dispatch `release.yml` when missing or incomplete.
 - **Release workflow** (`.github/workflows/release.yml`): Fetches and verifies the upstream tag commit, mirrors the tag, builds and smoke-tests all 6 targets, stages assets in a draft release, attests build provenance, and publishes the release only after all targets succeed.
 
 To trigger a release build manually for a specific upstream tag:

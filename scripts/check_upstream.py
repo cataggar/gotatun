@@ -39,13 +39,8 @@ def parse_semver(tag: str) -> tuple[int, int, int] | None:
 
 
 def expected_assets(tag: str) -> list[str]:
-    """Return the 12 required release asset filenames for a given tag."""
-    assets: list[str] = []
-    for target, ext in TARGET_ARCHIVES:
-        archive = f"gotatun-{tag}-{target}.{ext}"
-        assets.append(archive)
-        assets.append(f"{archive}.sha256")
-    return assets
+    """Return the 6 required release archive filenames for a given tag."""
+    return [f"gotatun-{tag}-{target}.{ext}" for target, ext in TARGET_ARCHIVES]
 
 
 def default_api_get(url: str) -> tuple[int, Any]:
@@ -151,7 +146,7 @@ def dereference_tag(
 
 
 def is_release_complete(tag: str, release_payload: Any) -> bool:
-    """Return True iff release is non-draft, non-prerelease, and has all 12 non-empty assets."""
+    """Return True iff release is non-draft, non-prerelease, and has all 6 non-empty archive assets."""
     if not isinstance(release_payload, dict):
         return False
     if bool(release_payload.get("draft")) or bool(release_payload.get("prerelease")):
